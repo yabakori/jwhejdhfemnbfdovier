@@ -24,22 +24,47 @@ function saveNotified(data) {
   fs.writeFileSync(NOTIFIED_FILE, JSON.stringify(data, null, 2));
 }
 
-// ─── Fetch live videos for a channel ─────────────────────────────────────────
-async function getLiveStreams(channelId) {
-  const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${channelId}&eventType=live&type=video&key=${API_KEY}`;
+// ─── Get uploads playlist ID for a channel ────────────────────────────────────
+async function getUploadsPlaylistId(channelId) {
+  const url = `https://www.googleapis.com/youtube/v3/channels?part=contentDetails&id=${channelId}&key=${API_KEY}`;
   const res = await fetch(url);
   const data = await res.json();
   if (data.error) {
     console.error(`YouTube API error for ${channelId}:`, data.error.message);
+    return null;
+  }
+  return data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads ?? null;
+}
+
+// ─── Get latest video IDs from uploads playlist ───────────────────────────────
+async function getLatestVideoIds(playlistId) {
+  const url = `https://www.googleapis.com/youtube/v3/playlistItems?part=contentDetails&playlistId=${playlistId}&maxResults=5&key=${API_KEY}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.error) {
+    console.error(`YouTube API error for playlist ${playlistId}:`, data.error.message);
     return [];
   }
-  return data.items ?? [];
+  return data.items?.map((item) => item.contentDetails.videoId) ?? [];
+}
+
+// ─── Check which videos are live ─────────────────────────────────────────────
+async function getLiveVideos(videoIds) {
+  const ids = videoIds.join(",");
+  const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet,liveStreamingDetails&id=${ids}&key=${API_KEY}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.error) {
+    console.error(`YouTube API error checking videos:`, data.error.message);
+    return [];
+  }
+  return data.items?.filter((v) => v.snippet.liveBroadcastContent === "live") ?? [];
 }
 
 // ─── Send Discord notification ────────────────────────────────────────────────
-async function sendDiscordNotification(stream) {
-  const { snippet } = stream;
-  const videoId = stream.id.videoId;
+async function sendDiscordNotification(video) {
+  const { snippet } = video;
+  const videoId = video.id;
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const channelName = snippet.channelTitle;
   const title = snippet.title;
@@ -95,16 +120,28 @@ async function main() {
 
   for (const channelId of config.channels) {
     console.log(`Checking channel: ${channelId}`);
-    const streams = await getLiveStreams(channelId);
 
-    if (streams.length === 0) {
+    const playlistId = await getUploadsPlaylistId(channelId);
+    if (!playlistId) {
+      console.log(`  → Could not get uploads playlist`);
+      continue;
+    }
+
+    const videoIds = await getLatestVideoIds(playlistId);
+    if (videoIds.length === 0) {
+      console.log(`  → No recent videos found`);
+      continue;
+    }
+
+    const liveVideos = await getLiveVideos(videoIds);
+    if (liveVideos.length === 0) {
       console.log(`  → Not live`);
       continue;
     }
 
-    for (const stream of streams) {
-      const title = stream.snippet?.title ?? "";
-      const videoId = stream.id.videoId;
+    for (const video of liveVideos) {
+      const title = video.snippet?.title ?? "";
+      const videoId = video.id;
 
       if (notified[videoId]) {
         console.log(`  → Already notified for "${title}", skipping`);
@@ -113,7 +150,7 @@ async function main() {
 
       if (matchesKeyword(title)) {
         console.log(`  → LIVE and matches keyword: "${title}"`);
-        await sendDiscordNotification(stream);
+        await sendDiscordNotification(video);
         notified[videoId] = now;
       } else {
         console.log(`  → Live but title doesn't match keywords: "${title}"`);
