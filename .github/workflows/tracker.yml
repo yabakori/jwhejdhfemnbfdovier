@@ -2,7 +2,7 @@ name: YouTube Livestream Tracker v2
 
 on:
   schedule:
-    - cron: "*/15 * * * *"  # Every 15 minutes
+    - cron: "*/20 * * * *"  # Every 15 minutes
   workflow_dispatch:          # Also lets you trigger it manually from GitHub
 
 jobs:
