@@ -67,7 +67,18 @@ function matchesKeyword(title) {
   const lower = title.toLowerCase();
   return config.keywords.some((kw) => lower.includes(kw.toLowerCase()));
 }
-
+async function sendTestMessage() {
+  const res = await fetch(WEBHOOK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content: "✅ Tracker ran successfully!" }),
+  });
+  if (!res.ok) {
+    console.error(`Failed to send test message: ${res.status}`);
+  } else {
+    console.log("✅ Test message sent to Discord");
+  }
+}
 // ─── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
   console.log(`Checking ${config.channels.length} channel(s) for live streams...`);
@@ -94,8 +105,7 @@ async function main() {
 
   console.log("Done.");
 }
-
-main().catch((err) => {
+sendTestMessage().then(() => main()).catch((err) => {
   console.error("Unexpected error:", err);
   process.exit(1);
 });
