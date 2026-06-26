@@ -48,17 +48,23 @@ async function getLatestVideoIds(playlistId) {
   return data.items?.map((item) => item.contentDetails.videoId) ?? [];
 }
 
-// ─── Check which videos are live ─────────────────────────────────────────────
+// ─── Batch check which videos are live (up to 50 IDs per request) ─────────────
 async function getLiveVideos(videoIds) {
-  const ids = videoIds.join(",");
-  const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet,liveStreamingDetails&id=${ids}&key=${API_KEY}`;
-  const res = await fetch(url);
-  const data = await res.json();
-  if (data.error) {
-    console.error(`YouTube API error checking videos:`, data.error.message);
-    return [];
+  const results = [];
+  for (let i = 0; i < videoIds.length; i += 50) {
+    const batch = videoIds.slice(i, i + 50);
+    const ids = batch.join(",");
+    const url = `https://www.googleapis.com/youtube/v3/videos?part=snippet,liveStreamingDetails&id=${ids}&key=${API_KEY}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.error) {
+      console.error(`YouTube API error checking videos:`, data.error.message);
+      continue;
+    }
+    const live = data.items?.filter((v) => v.snippet.liveBroadcastContent === "live") ?? [];
+    results.push(...live);
   }
-  return data.items?.filter((v) => v.snippet.liveBroadcastContent === "live") ?? [];
+  return results;
 }
 
 // ─── Send Discord notification ────────────────────────────────────────────────
@@ -118,43 +124,59 @@ async function main() {
 
   console.log(`Checking ${config.channels.length} channel(s) for live streams...`);
 
-  for (const channelId of config.channels) {
-    console.log(`Checking channel: ${channelId}`);
+  // Step 1 — get all playlist IDs in parallel
+  const playlistEntries = await Promise.all(
+    config.channels.map(async (channelId) => {
+      const playlistId = await getUploadsPlaylistId(channelId);
+      return { channelId, playlistId };
+    })
+  );
 
-    const playlistId = await getUploadsPlaylistId(channelId);
-    if (!playlistId) {
-      console.log(`  → Could not get uploads playlist`);
-      continue;
-    }
-
-    const videoIds = await getLatestVideoIds(playlistId);
-    if (videoIds.length === 0) {
-      console.log(`  → No recent videos found`);
-      continue;
-    }
-
-    const liveVideos = await getLiveVideos(videoIds);
-    if (liveVideos.length === 0) {
-      console.log(`  → Not live`);
-      continue;
-    }
-
-    for (const video of liveVideos) {
-      const title = video.snippet?.title ?? "";
-      const videoId = video.id;
-
-      if (notified[videoId]) {
-        console.log(`  → Already notified for "${title}", skipping`);
-        continue;
+  // Step 2 — get all video IDs in parallel
+  const allVideoIds = [];
+  await Promise.all(
+    playlistEntries.map(async ({ channelId, playlistId }) => {
+      if (!playlistId) {
+        console.log(`  → Could not get uploads playlist for ${channelId}`);
+        return;
       }
+      const ids = await getLatestVideoIds(playlistId);
+      allVideoIds.push(...ids);
+    })
+  );
 
-      if (matchesKeyword(title)) {
-        console.log(`  → LIVE and matches keyword: "${title}"`);
-        await sendDiscordNotification(video);
-        notified[videoId] = now;
-      } else {
-        console.log(`  → Live but title doesn't match keywords: "${title}"`);
-      }
+  if (allVideoIds.length === 0) {
+    console.log("No videos found across all channels.");
+    saveNotified(notified);
+    return;
+  }
+
+  // Step 3 — batch check all video IDs at once
+  console.log(`Checking ${allVideoIds.length} videos for live status...`);
+  const liveVideos = await getLiveVideos(allVideoIds);
+
+  if (liveVideos.length === 0) {
+    console.log("No live streams found.");
+    saveNotified(notified);
+    return;
+  }
+
+  // Step 4 — notify for new live streams
+  for (const video of liveVideos) {
+    const title = video.snippet?.title ?? "";
+    const videoId = video.id;
+
+    if (notified[videoId]) {
+      console.log(`  → Already notified for "${title}", skipping`);
+      continue;
+    }
+
+    if (matchesKeyword(title)) {
+      console.log(`  → LIVE and matches keyword: "${title}"`);
+      await sendDiscordNotification(video);
+      notified[videoId] = now;
+    } else {
+      console.log(`  → Live but title doesn't match keywords: "${title}"`);
     }
   }
 
